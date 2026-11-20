@@ -3,6 +3,7 @@ package com.sodawatch.android;
 import android.graphics.Rect;
 
 import java.util.List;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import com.sodawatch.android.AdFlow.Phase;
@@ -21,8 +22,13 @@ final class ScreenReading {
 
     private static final Pattern TIMER = Pattern.compile("[0-9０-９]{1,3}(秒|[sS])(?:之后|后)?(?:可(?:以)?|就能)?(?:领取|获得|领)(?:奖励|权益)");
     private static final Pattern LIVE = Pattern.compile("[0-9０-９]{1,2}(秒|[sS])后(?:自动)?进入直播间");
-    private static final Pattern COMPLETE = Pattern.compile("(?:(?:奖励)?领取成功|领取奖励成功|已领取奖励|奖励已领取)[!！×✕✖✗xX]?");
-    private static final Pattern CLOSE_CONTROL = Pattern.compile("[×✕✖✗xX]|关闭(?:广告)?");
+    private static final String CLOSE_GLYPH = "[×✕✖✗xX]";
+    private static final String CLOSE_DESCRIPTION = "关闭(?:广告)?(?:[,，]按钮)?";
+    private static final Pattern COMPLETE = Pattern.compile(
+            "(?<countdown>[0-9０-９]{1,3}[sSｓＳ秒][|｜丨lI,，:：·]?)?"
+                    + "(?:(?:奖励)?领取成功|领取奖励成功|已领取奖励|奖励已领取)[!！]?"
+                    + "(?:(?<glyph>" + CLOSE_GLYPH + ")|[,，](?<description>" + CLOSE_DESCRIPTION + "))?");
+    private static final Pattern CLOSE_CONTROL = Pattern.compile(CLOSE_GLYPH + "|" + CLOSE_DESCRIPTION);
     private static final Pattern ENTRY = Pattern.compile("(?:看|观看)(?:广告|视频)(?:即可)?领(?:取)?(?:免费听歌)?(?:时长|畅听)");
     private static final Pattern OFFER = Pattern.compile("(?:立即)?解锁(?:第[0-9０-９一二三四五六七八九十]+[天日])?畅听|领时长|继续领");
     private static final Pattern DAILY_OFFER = Pattern.compile("第[0-9０-９一二三四五六七八九十]+[天日]畅听");
@@ -31,6 +37,12 @@ final class ScreenReading {
     private static final Pattern DAY_GRANTED = Pattern.compile("恭喜获得第[0-9０-９一二三四五六七八九十]+[日天]畅听");
     private static final Pattern CLAIM = Pattern.compile("领取奖励|确认领取|继续看(?:广告|视频)|观看下一(?:条|个)(?:广告|视频)?");
     private static final Pattern CONTINUE_WATCHING = Pattern.compile("继续观看(?:广告|视频)?");
+    private static final Pattern CLAIM_REWARD = Pattern.compile("领取奖励(?:[,，]按钮)?");
+    private static final String NEXT_DAY_LISTENING = "(?:明日|明天)免费听(?:歌)?";
+    private static final Pattern MORE_VIDEOS = Pattern.compile(
+            "再看[0-9０-９一二三四五六七八九十]{1,2}(?:个|条)(?:视频|广告)(?:提前得|即可得|得)?(?:"
+                    + NEXT_DAY_LISTENING + "[!！]?)?");
+    private static final Pattern NEXT_DAY_REWARD = Pattern.compile("(?:再看.{1,20})?" + NEXT_DAY_LISTENING + "[!！]?");
     private static final Pattern TOP_CONTINUE = Pattern.compile("继续观看(?:广告|视频)?(?:[×✕✖✗xX]|[，,]关闭(?:[，,]按钮)?)?");
     private static final Pattern REWARD_GRANTED = Pattern.compile(
             "恭喜(?:你|您)?获得(?:奖励|[+＋]?[0-9０-９,，]+金币)|奖励已领取|已领取奖励");
@@ -60,8 +72,15 @@ final class ScreenReading {
         }
         Label continuation = findCentered(labels, window, CONTINUE_WATCHING);
         Label claim = findCentered(labels, window, CLAIM);
-        boolean exitPrompt = contains(labels, EXIT_PROMPT);
-        if (exitPrompt) {
+        Label complete = findCompletion(labels, window);
+        if (findCentered(labels, window, MORE_VIDEOS) != null && findCentered(labels, window, NEXT_DAY_REWARD) != null) {
+            Label rewardButton = findCentered(labels, window, CLAIM_REWARD);
+            if (rewardButton == null) return observation(Signal.REWARD_DIALOG);
+            boolean nextAd = complete != null || phase == Phase.WAITING_FOR_RETURN
+                    || (phase == Phase.READY && !contains(labels, TIMER));
+            return new Reading(nextAd ? Signal.CLAIM : Signal.RESUME, rewardButton.bounds(), "领取奖励");
+        }
+        if (contains(labels, EXIT_PROMPT)) {
             if (continuation != null) return click(Signal.RESUME, continuation);
             if (claim != null) return click(Signal.RESUME, claim);
             return observation(Signal.REWARD_DIALOG);
@@ -70,15 +89,12 @@ final class ScreenReading {
         Label cancel = find(labels, window, CANCEL, 0f, .34f);
         if (cancel != null && contains(labels, LIVE)) return click(Signal.LIVE_CANCEL, cancel);
 
-        Label complete = find(labels, window, COMPLETE, 0f, .33f);
         boolean rewardContext = contains(labels, REWARD_CONTEXT);
         boolean timer = contains(labels, TIMER);
         boolean rewardGranted = complete != null || contains(labels, REWARD_GRANTED);
         Label topContinue = findTopContinuation(labels, window);
         if (topContinue != null && (rewardGranted || phase != Phase.READY)) {
-            boolean continuingSameAd = timer || exitPrompt;
-            return topContinuationClick(continuingSameAd ? Signal.RESUME : Signal.TOP_CONTINUE,
-                    topContinue, rewardGranted && !continuingSameAd);
+            return topContinuationClick(timer ? Signal.RESUME : Signal.TOP_CONTINUE, topContinue, rewardGranted && !timer);
         }
         if (continuation != null) {
             if (timer) return click(Signal.RESUME, continuation);
@@ -91,7 +107,7 @@ final class ScreenReading {
             return click(Signal.CLAIM, claim);
         }
 
-        if (complete != null) return click(Signal.COMPLETE, closeButton(labels, window, complete));
+        if (complete != null) return completionClick(labels, window, complete);
         if (timer) return observation(Signal.TIMER);
         if (contains(labels, LIMIT)) return observation(Signal.FINISHED);
 
@@ -129,20 +145,55 @@ final class ScreenReading {
         return new Reading(signal, bounds, "继续观看", rewardVisible, null);
     }
 
-    private static Label closeButton(List<Label> labels, Rect window, Label complete) {
+    private static Label findCompletion(List<Label> labels, Rect window) {
+        Label best = null;
+        int bestRank = 0;
+        for (Label label : labels) {
+            Rect bounds = label.bounds();
+            if (!usable(bounds, window) || bounds.centerY() > window.top + window.height() * .33f) continue;
+            Matcher match = COMPLETE.matcher(label.text());
+            if (!match.matches()) continue;
+            if (match.group("countdown") != null && (bounds.centerX() < window.left + window.width() * .58f
+                    || bounds.centerY() > window.top + window.height() * .22f || bounds.width() > window.width() * .48f)) continue;
+            int rank = match.group("glyph") != null ? 3 : match.group("description") != null ? 2 : 1;
+            if (rank > bestRank || (rank == bestRank && bounds.width() < best.bounds().width())) {
+                best = label;
+                bestRank = rank;
+            }
+        }
+        return best;
+    }
+
+    private static Reading completionClick(List<Label> labels, Rect window, Label complete) {
         Rect marker = complete.bounds();
-        Label nearest = complete;
+        Matcher match = COMPLETE.matcher(complete.text());
+        match.matches();
+        Rect nearest = null;
+        int closeWidth = 0;
+        if (match.group("glyph") != null) {
+            closeWidth = Math.max(1, Math.min(marker.width() / 4, marker.height()));
+        } else if (match.group("description") != null) {
+            closeWidth = Math.max(1, Math.min(marker.width() / 2, marker.height()));
+        }
         int distance = window.width() / 4;
         for (Label label : labels) {
             Rect bounds = label.bounds();
             if (!usable(bounds, window) || !CLOSE_CONTROL.matcher(label.text()).matches()) continue;
+            if (closeWidth > 0 && bounds.centerX() < marker.right - closeWidth) continue;
             int rightward = bounds.centerX() - marker.centerX();
             if (rightward <= 0 || rightward >= distance || bounds.width() > window.width() / 8) continue;
             if (Math.abs(bounds.centerY() - marker.centerY()) > Math.max(marker.height(), window.height() / 46)) continue;
             distance = rightward;
-            nearest = label;
+            nearest = bounds;
         }
-        return nearest;
+        if (nearest != null) return new Reading(Signal.COMPLETE, nearest, "关闭广告（领取成功）");
+        if (closeWidth > 0) {
+            // OCR and accessibility can report the text and close control as one box.
+            Rect close = new Rect(marker.right - closeWidth, marker.top, marker.right, marker.bottom);
+            return new Reading(Signal.COMPLETE, close, "关闭广告（领取成功）");
+        }
+        if (match.group("countdown") != null) return observation(Signal.COMPLETE);
+        return click(Signal.COMPLETE, complete);
     }
 
     private static boolean contains(List<Label> labels, Pattern pattern) {

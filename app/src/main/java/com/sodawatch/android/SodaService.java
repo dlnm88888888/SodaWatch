@@ -40,19 +40,25 @@ public final class SodaService extends AccessibilityService {
     private static final long BETWEEN_FRAMES = 850L;
     private static final long AFTER_CLICK = 1_400L;
     private static final long IDLE_TIMEOUT = 78_000L;
-    private static final long SESSION_LIMIT = 12 * 60_000L;
+    private static final long SCREEN_WAKE_TIMEOUT = 12 * 60_000L;
+    private static final int NO_TASK = -1;
     private static final int TRACE_LIMIT = 32;
     private static final int NODE_SCAN_LIMIT = 1_200;
     private static final String LOG_PREFS = "last_run";
     private static final String LOG_KEY = "events";
 
-    record Status(boolean running, String detail, int completed, int goal) { }
+    record Status(boolean running, String detail, long completed, int goal) {
+        boolean hasResult() { return goal != NO_TASK; }
+        String progress() {
+            return "完成 " + completed + (goal == AdFlow.UNLIMITED ? " 轮" : " / " + goal + " 轮");
+        }
+    }
     private record NodeEntry(AccessibilityNodeInfo node, int parent) { }
     private record NodeSnapshot(List<Label> labels, List<Rect> inputBounds, String details) { }
     private record OcrSnapshot(List<Label> labels, String details) { }
 
     private static SodaService connected;
-    private static Status status = new Status(false, "", 0, 0);
+    private static Status status = new Status(false, "", 0, NO_TASK);
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final Runnable tick = this::scan;
@@ -65,6 +71,8 @@ public final class SodaService extends AccessibilityService {
     private String lastWindowDescription;
     private String lastDecision;
     private AdFlow session;
+    private PowerManager.WakeLock screenWakeLock;
+    private long nextScreenWakeRenewal;
     private TextRecognizer recognizer;
     private long startedAt;
     private long lastProgress;
@@ -103,6 +111,7 @@ public final class SodaService extends AccessibilityService {
 
     void begin(int target) {
         handler.removeCallbacks(tick);
+        releaseScreenWakeLock();
         session = new AdFlow(target);
         startedAt = lastProgress = SystemClock.elapsedRealtime();
         windowWait = new WindowWait(startedAt);
@@ -118,19 +127,48 @@ public final class SodaService extends AccessibilityService {
         lastDecision = null;
         diagnostic.reset(startedAt, "汽水领时长 / Android API " + Build.VERSION.SDK_INT
                 + "\n坐标为屏幕像素。AX=无障碍控件，OCR=截图上识别到的文字。只记录最新一次运行。");
-        logEvent("开始任务，目标 " + target + " 轮");
+        logEvent("开始任务，" + (target == AdFlow.UNLIMITED ? "不限轮数" : "目标 " + target + " 轮"));
+        keepScreenOn(startedAt);
         publish("正在打开汽水音乐");
         schedule(350L);
     }
 
     void stop(String reason) {
+        releaseScreenWakeLock();
         if (session == null) return;
-        logEvent("结束：" + reason + "（完成 " + session.completed() + " / " + session.target() + " 轮）");
-        status = new Status(false, reason, session.completed(), session.target());
+        Status result = new Status(false, reason, session.completed(), session.target());
+        logEvent("结束：" + reason + "（" + result.progress() + "）");
+        status = result;
         session = null;
         handler.removeCallbacks(tick);
         previousWindow = null;
         previousReading = null;
+    }
+
+    @SuppressWarnings("deprecation")
+    private void keepScreenOn(long now) {
+        // The task runs in another app's window, where our activity cannot set FLAG_KEEP_SCREEN_ON.
+        PowerManager.WakeLock lock = screenWakeLock;
+        boolean firstAcquire = lock == null;
+        if (firstAcquire) {
+            PowerManager power = getSystemService(PowerManager.class);
+            lock = power.newWakeLock(PowerManager.SCREEN_DIM_WAKE_LOCK, "SodaWatch:ActiveTask");
+            lock.setReferenceCounted(false);
+        }
+        nextScreenWakeRenewal = now + SCREEN_WAKE_TIMEOUT / 2;
+        try {
+            lock.acquire(SCREEN_WAKE_TIMEOUT);
+            screenWakeLock = lock;
+            if (firstAcquire) logEvent("已开启任务亮屏");
+        } catch (SecurityException denied) {
+            logEvent("系统未允许任务保持亮屏");
+        }
+    }
+
+    private void releaseScreenWakeLock() {
+        if (screenWakeLock == null) return;
+        if (screenWakeLock.isHeld()) screenWakeLock.release();
+        screenWakeLock = null;
     }
 
     private void logEvent(String event) {
@@ -162,10 +200,6 @@ public final class SodaService extends AccessibilityService {
             stop("手机已锁屏，任务已停止");
             return;
         }
-        if (now - startedAt >= SESSION_LIMIT) {
-            stop("已到本次运行时间上限");
-            return;
-        }
         Observation observed = musicWindow.inspect();
         recordForeground(now, observed);
         Target window = observed.target();
@@ -188,6 +222,8 @@ public final class SodaService extends AccessibilityService {
             stop(screenshotBlocked ? "当前页面限制截图，且没有可识别的按钮" : "长时间未识别到下一步，请检查汽水音乐页面");
             return;
         }
+        // Extend the timed lock only while the target window is readable and the task is progressing.
+        if (screenWakeLock != null && now >= nextScreenWakeRenewal) keepScreenOn(now);
         publish(current.status());
         capture(current, window);
     }
@@ -474,7 +510,7 @@ public final class SodaService extends AccessibilityService {
             return;
         }
         logReading(reading);
-        int previousCount = current.completed();
+        long previousCount = current.completed();
         long now = SystemClock.elapsedRealtime();
         Action action = current.observe(reading.signal(), now);
         String decision = "流程 phase=" + current.phase() + " signal=" + reading.signal() + " action=" + action;
@@ -486,7 +522,7 @@ public final class SodaService extends AccessibilityService {
         if (previousCount != current.completed()) logEvent("确认完成第 " + current.completed() + " 轮");
         if (action == Action.STOP) {
             if (reading.signal() == Signal.BLOCKED) stop("遇到付款或系统确认页面，任务已停止");
-            else stop(current.completed() >= current.target() ? "已完成目标轮数" : "已到领取结果页面，请查看畅听时长");
+            else stop(current.reachedTarget() ? "已完成目标轮数" : "已到领取结果页面，请查看畅听时长");
             return;
         }
         publish(current.status());

@@ -23,6 +23,7 @@ import android.view.Gravity;
 import android.view.View;
 import android.view.WindowInsets;
 import android.widget.Button;
+import android.widget.CheckBox;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
@@ -59,13 +60,15 @@ public final class MainActivity extends Activity {
     private Button startButton;
     private Button decrease;
     private Button increase;
+    private CheckBox unlimitedRounds;
+    private LinearLayout roundStepper;
     private int rounds;
     private SodaService.Status lastStatus;
     private boolean lastConnection;
 
     @Override protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        rounds = getPreferences(MODE_PRIVATE).getInt("rounds", 3);
+        rounds = Math.max(1, getPreferences(MODE_PRIVATE).getInt("rounds", 3));
         getWindow().setDecorFitsSystemWindows(false);
         buildScreen();
     }
@@ -128,16 +131,26 @@ public final class MainActivity extends Activity {
         TextView roundsTitle = text("本次广告轮数", 17, INK, true);
         roundsTitle.setAccessibilityHeading(true);
         add(roundsCard, roundsTitle, 0);
-        LinearLayout stepper = new LinearLayout(this);
-        stepper.setGravity(Gravity.CENTER_VERTICAL | Gravity.CENTER_HORIZONTAL);
-        add(roundsCard, stepper, 12);
+        unlimitedRounds = new CheckBox(this);
+        unlimitedRounds.setText("不限轮数");
+        unlimitedRounds.setTextSize(15);
+        unlimitedRounds.setMinHeight(dp(48));
+        unlimitedRounds.setChecked(getPreferences(MODE_PRIVATE).getBoolean("unlimitedRounds", false));
+        unlimitedRounds.setOnCheckedChangeListener((button, checked) -> {
+            getPreferences(MODE_PRIVATE).edit().putBoolean("unlimitedRounds", checked).apply();
+            displayRounds(SodaService.status().running());
+        });
+        add(roundsCard, unlimitedRounds, 4);
+        roundStepper = new LinearLayout(this);
+        roundStepper.setGravity(Gravity.CENTER_VERTICAL | Gravity.CENTER_HORIZONTAL);
+        add(roundsCard, roundStepper, 4);
         decrease = stepButton("−", "减少一轮", -1);
-        stepper.addView(decrease, new LinearLayout.LayoutParams(dp(54), dp(48)));
+        roundStepper.addView(decrease, new LinearLayout.LayoutParams(dp(54), dp(48)));
         countLabel = text("", 26, INK, true);
         countLabel.setGravity(Gravity.CENTER);
-        stepper.addView(countLabel, new LinearLayout.LayoutParams(0, -2, 1));
+        roundStepper.addView(countLabel, new LinearLayout.LayoutParams(0, -2, 1));
         increase = stepButton("+", "增加一轮", 1);
-        stepper.addView(increase, new LinearLayout.LayoutParams(dp(54), dp(48)));
+        roundStepper.addView(increase, new LinearLayout.LayoutParams(dp(54), dp(48)));
 
         startButton = new Button(this);
         startButton.setMinHeight(dp(56));
@@ -155,7 +168,7 @@ public final class MainActivity extends Activity {
         errorLabel.setVisibility(View.GONE);
         add(body, errorLabel, 9);
 
-        add(body, text("启动后保持汽水音乐在前台、手机亮屏。退出汽水音乐即可停止。画面在手机本地识别。", 14, MUTED, false), 14);
+        add(body, text("任务期间自动保持亮屏。退出汽水音乐或手动锁屏即可停止。画面在手机本地识别。", 14, MUTED, false), 14);
         Button logButton = new Button(this);
         logButton.setText("查看运行日志");
         logButton.setAllCaps(false);
@@ -182,12 +195,12 @@ public final class MainActivity extends Activity {
             startButton.setText("打开无障碍设置");
         } else if (current.running()) {
             stateTitle.setText("任务运行中");
-            stateDetail.setText(current.detail() + " · " + current.completed() + " / " + current.goal() + " 轮");
+            stateDetail.setText(current.detail() + " · " + current.progress());
             startButton.setText("停止任务");
         } else {
-            boolean hasResult = current.goal() > 0;
+            boolean hasResult = current.hasResult();
             stateTitle.setText(hasResult ? "上次任务" : "可以开始");
-            stateDetail.setText(hasResult ? "完成 " + current.completed() + " / " + current.goal() + " 轮 · " + current.detail()
+            stateDetail.setText(hasResult ? current.progress() + " · " + current.detail()
                     : "选好轮数后，助手会自动打开汽水音乐。");
             startButton.setText("开始并打开汽水音乐");
         }
@@ -210,7 +223,7 @@ public final class MainActivity extends Activity {
             showError("没有找到已安装的汽水音乐，请先安装安卓版汽水音乐。");
             return;
         }
-        service.begin(rounds);
+        service.begin(unlimitedRounds.isChecked() ? AdFlow.UNLIMITED : rounds);
         try {
             startActivity(launch);
         } catch (ActivityNotFoundException | SecurityException error) {
@@ -328,7 +341,7 @@ public final class MainActivity extends Activity {
         button.setBackground(ripple(TINT, GREEN, 14));
         button.setStateListAnimator(null);
         button.setOnClickListener(view -> {
-            rounds = Math.max(1, Math.min(10, rounds + change));
+            rounds = (int) Math.max(1, Math.min(Integer.MAX_VALUE, (long) rounds + change));
             getPreferences(MODE_PRIVATE).edit().putInt("rounds", rounds).apply();
             displayRounds(SodaService.status().running());
         });
@@ -336,10 +349,12 @@ public final class MainActivity extends Activity {
     }
 
     private void displayRounds(boolean running) {
+        unlimitedRounds.setEnabled(!running);
+        roundStepper.setVisibility(unlimitedRounds.isChecked() ? View.GONE : View.VISIBLE);
         String label = rounds + " 轮";
         if (!label.contentEquals(countLabel.getText())) countLabel.setText(label);
         decrease.setEnabled(!running && rounds > 1);
-        increase.setEnabled(!running && rounds < 10);
+        increase.setEnabled(!running && rounds < Integer.MAX_VALUE);
     }
 
     private void add(LinearLayout parent, View child, int gap) {

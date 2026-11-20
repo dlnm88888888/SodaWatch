@@ -1,6 +1,8 @@
 package com.sodawatch.android;
 
 final class AdFlow {
+    static final int UNLIMITED = 0;
+
     enum Signal { UNKNOWN, BLOCKED, ENTRY, CLAIM, TOP_CONTINUE, RESUME, REWARD_DIALOG, DOWNLOAD_PROMO, TIMER, COMPLETE, LIVE_CANCEL, FINISHED }
     enum Action { WAIT, OPEN, RESUME, CLOSE, CANCEL_LIVE, DISMISS_PROMO, STOP }
     enum Phase { READY, WAITING_FOR_AD, WATCHING, WAITING_FOR_RETURN }
@@ -9,7 +11,7 @@ final class AdFlow {
 
     private final int target;
     private Phase phase = Phase.READY;
-    private int completed;
+    private long completed;
     private boolean liveCancelled;
     private boolean changed;
     private int openClicks;
@@ -22,14 +24,15 @@ final class AdFlow {
     private boolean rewardBeforeTopContinuation;
 
     AdFlow(int target) {
-        if (target < 1 || target > 10) {
-            throw new IllegalArgumentException("Target must be between 1 and 10");
+        if (target < UNLIMITED) {
+            throw new IllegalArgumentException("Target must be positive or UNLIMITED");
         }
         this.target = target;
     }
 
-    int completed() { return completed; }
+    long completed() { return completed; }
     int target() { return target; }
+    boolean reachedTarget() { return target != UNLIMITED && completed >= target; }
     boolean changed() { return changed; }
     Phase phase() { return phase; }
 
@@ -61,7 +64,7 @@ final class AdFlow {
         } else if (phase == Phase.WATCHING && signal == Signal.CLAIM) {
             finishRound();
         }
-        if (completed >= target || signal == Signal.FINISHED) {
+        if (reachedTarget() || signal == Signal.FINISHED) {
             return Action.STOP;
         }
         if (signal == Signal.TIMER || signal == Signal.LIVE_CANCEL || signal == Signal.COMPLETE) {
