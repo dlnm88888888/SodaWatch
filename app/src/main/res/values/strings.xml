@@ -1,0 +1,14 @@
+<resources>
+    <string name="app_name">汽水领时长</string>
+    <string name="service_description">手动启动后，仅识别前台汽水音乐界面，等待广告播完并点击领时长按钮。离开汽水音乐或锁屏会停止。用于识别的画面在本机处理。</string>
+    <style name="AppTheme" parent="android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:colorAccent">#116B57</item>
+        <item name="android:windowBackground">#EFF5F1</item>
+        <item name="android:statusBarColor">#EFF5F1</item>
+        <item name="android:navigationBarColor">#EFF5F1</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowLightNavigationBar">true</item>
+        <item name="android:forceDarkAllowed">false</item>
+    </style>
+</resources>
